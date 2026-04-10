@@ -39,7 +39,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/terminal"
 )
 
-const version = "4.0.14"
+const version = "4.0.15"
 
 //go:embed static/*
 var staticFiles embed.FS
@@ -1529,7 +1529,14 @@ func (s *Server) runMultiScan(req ScanRequest, scanCfg *config.Config, instanceI
 
 		switch req.ScanMode {
 		case "wildcard":
-			s.runWildcardTarget(ctx, scanCfg, req, target, i, totalTargets)
+			// If the user supplied multiple targets in wildcard mode, those ARE the
+			// subdomains — skip Phase 1 and scan each directly as a subdomain.
+			// Phase 1 discovery only makes sense when a single root domain is given.
+			if totalTargets > 1 {
+				s.runSingleTarget(ctx, scanCfg, req, target, i, totalTargets)
+			} else {
+				s.runWildcardTarget(ctx, scanCfg, req, target, i, totalTargets)
+			}
 		case "dast":
 			s.runDASTTarget(ctx, scanCfg, req, target, i, totalTargets)
 		default:
@@ -1882,7 +1889,7 @@ func (s *Server) collectSubdomains(scanDir, target string) []string {
 	seen := make(map[string]bool)
 	var subdomains []string
 
-	// Helper: extract valid subdomains from a file
+	// Helper: extract valid subdomains from a file (must be subdomains of the target)
 	extractFromFile := func(path string) []string {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -1900,7 +1907,11 @@ func (s *Server) collectSubdomains(scanDir, target string) []string {
 			parts := strings.Fields(line)
 			if len(parts) > 0 {
 				domain := strings.TrimRight(parts[0], "/.,;:")
-				if strings.Contains(domain, ".") && !seen[domain] {
+				domain = strings.ToLower(domain)
+				// CRITICAL: Only accept subdomains that actually belong to the target domain.
+				// Recon tools (subfinder, crt.sh, assetfinder) often return related but
+				// unrelated domains from certificate chains, DNS records, etc.
+				if strings.Contains(domain, ".") && strings.HasSuffix(domain, "."+target) && !seen[domain] {
 					seen[domain] = true
 					found = append(found, domain)
 				}

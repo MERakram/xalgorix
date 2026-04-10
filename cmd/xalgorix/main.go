@@ -20,7 +20,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/web"
 )
 
-const version = "4.0.14"
+const version = "4.0.15"
 
 func main() {
 	// Top-level crash recovery — catches panics that escape all other handlers.
