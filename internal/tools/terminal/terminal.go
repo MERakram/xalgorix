@@ -450,9 +450,8 @@ func runShell(command string) (string, int) {
 
 	// Build dynamic PATH including all possible tool locations
 	dynamicPath := goPath + "/bin:" + homeDir + "/go/bin:" + homeDir + "/.local/bin"
-	dynamicPath += ":" + homeDir + "/.cargo/bin" // Rust tools (findomain, rustscan)
+	dynamicPath += ":" + homeDir + "/.cargo/bin" // Rust tools (findomain, rustscan, feroxbuster)
 	dynamicPath += ":/usr/local/bin:/snap/bin"   // Common install locations
-	dynamicPath += ":/home/*/go/bin:/home/*/.local/bin"
 
 	cmdEnv := append(os.Environ(),
 		"PATH="+dynamicPath+":"+os.Getenv("PATH"),
@@ -649,6 +648,11 @@ func installPackage(pkg string) string {
 		"scrapling": "scrapling",
 	}
 
+	// Special handling for Cargo (Rust) tools
+	cargoTools := map[string]string{
+		"feroxbuster": "feroxbuster",
+	}
+
 	// Special handling for Go-installed tools
 	goTools := map[string]string{
 		// ProjectDiscovery suite
@@ -666,7 +670,6 @@ func installPackage(pkg string) string {
 		// Fuzzing & enumeration
 		"gobuster":    "github.com/OJ/gobuster/v3@latest",
 		"ffuf":        "github.com/ffuf/ffuf/v2@latest",
-		"feroxbuster": "github.com/epi052/feroxbuster@latest",
 		"assetfinder": "github.com/tomnomnom/assetfinder@latest",
 		// Vulnerability scanners
 		"dalfox": "github.com/hahwul/dalfox/v2@latest",
@@ -701,6 +704,23 @@ func installPackage(pkg string) string {
 			return fmt.Sprintf("[install %s via pipx/pip failed: %s]\n%s", pkg, err, truncate(string(out)))
 		}
 		return fmt.Sprintf("[installed %s via pipx successfully]", pkg)
+	}
+
+	// Cargo (Rust) tools
+	if cargoPkg, ok := cargoTools[pkg]; ok {
+		// Try apt first (faster), then cargo install as fallback
+		installCmd := fmt.Sprintf("apt-get install -y -q %s 2>&1 || cargo install %s 2>&1", cargoPkg, cargoPkg)
+		if os.Getuid() != 0 {
+			installCmd = fmt.Sprintf("sudo apt-get install -y -q %s 2>&1 || cargo install %s 2>&1", cargoPkg, cargoPkg)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", "-c", installCmd)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Sprintf("[install %s via apt/cargo failed: %s]\n%s", pkg, err, truncate(string(out)))
+		}
+		return fmt.Sprintf("[installed %s successfully]", pkg)
 	}
 
 	if goPkg, ok := goTools[pkg]; ok {
@@ -1071,5 +1091,3 @@ func checkObfuscation(cmd string) string {
 	return ""
 }
 
-// Silence the log import
-var _ = log.Println

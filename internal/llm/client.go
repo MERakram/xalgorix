@@ -284,7 +284,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 
 		var body []byte
 		if isGoogle {
-			endpoint = strings.TrimSuffix(endpoint, "generateContent") + "streamGenerateContent"
+			endpoint = strings.TrimSuffix(endpoint, "generateContent") + "streamGenerateContent?alt=sse"
 			var systemParts []geminiPart
 			contents := make([]geminiContent, 0, len(messages))
 			for _, m := range messages {
@@ -313,7 +313,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 					anthropicMsgs = append(anthropicMsgs, m)
 				}
 			}
-			maxTokens := 4096
+			maxTokens := 8192
 			anReq := anthropicRequest{
 				Model:     model,
 				Messages:  anthropicMsgs,
@@ -342,6 +342,9 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 			if c.cfg.APIKey != "" {
 				req.Header.Set("x-goog-api-key", c.cfg.APIKey)
 			}
+		} else if isAnthropic && c.cfg.APIKey != "" {
+			req.Header.Set("x-api-key", c.cfg.APIKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
 		} else if c.cfg.APIKey != "" {
 			req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 		}
@@ -506,8 +509,8 @@ func (c *Client) doChat(messages []Message) (string, error) {
 				anthropicMsgs = append(anthropicMsgs, m)
 			}
 		}
-		// Default max_tokens; user can override via config if needed
-		maxTokens := 4096
+		// Default max_tokens; Anthropic requires this field
+		maxTokens := 8192
 		anReq := anthropicRequest{
 			Model:     model,
 			Messages:  anthropicMsgs,
@@ -541,6 +544,9 @@ func (c *Client) doChat(messages []Message) (string, error) {
 		if c.cfg.APIKey != "" {
 			req.Header.Set("x-goog-api-key", c.cfg.APIKey)
 		}
+	} else if isAnthropic && c.cfg.APIKey != "" {
+		req.Header.Set("x-api-key", c.cfg.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
 	} else if c.cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	}

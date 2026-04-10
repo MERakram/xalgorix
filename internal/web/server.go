@@ -39,7 +39,7 @@ import (
 	"github.com/xalgord/xalgorix/v4/internal/tools/terminal"
 )
 
-const version = "4.0.13"
+const version = "4.0.14"
 
 //go:embed static/*
 var staticFiles embed.FS
@@ -131,10 +131,9 @@ func rateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
 				return
 			}
 			
+			// Use RemoteAddr only — do not trust X-Forwarded-For as it can be
+			// spoofed when running without a trusted reverse proxy.
 			ip := r.RemoteAddr
-			if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-				ip = strings.Split(forwarded, ",")[0]
-			}
 			
 			if !rl.Allow(ip) {
 				http.Error(w, "Rate limit exceeded. Please try again later.", http.StatusTooManyRequests)
@@ -1001,6 +1000,7 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 type scanSession struct {
 	id             string
 	target         string
+	parentTarget   string // parent domain for subdomain scans (wildcard mode)
 	scanDir        string
 	cfg            *config.Config
 	agent          *agent.Agent
@@ -1107,12 +1107,13 @@ func (s *Server) executeScanSession(sess *scanSession) {
 
 	// 4. Initialize scan record
 	sess.record = &ScanRecord{
-		ID:        sess.id,
-		Target:    sess.target,
-		StartedAt: time.Now().Format(time.RFC3339),
-		Status:    "running",
-		Events:    []WSEvent{},
-		Vulns:     []VulnSummary{},
+		ID:           sess.id,
+		Target:       sess.target,
+		ParentTarget: sess.parentTarget,
+		StartedAt:    time.Now().Format(time.RFC3339),
+		Status:       "running",
+		Events:       []WSEvent{},
+		Vulns:        []VulnSummary{},
 	}
 	s.saveScanRecordTo(sess.record, sess.scanDir)
 
@@ -1749,6 +1750,7 @@ func (s *Server) runWildcardTarget(_ context.Context, scanCfg *config.Config, re
 			subSess := &scanSession{
 				id:             filepath.Base(subScanDir),
 				target:         subdomain,
+				parentTarget:   target,
 				scanDir:        subScanDir,
 				cfg:            scanCfg,
 				server:         s,

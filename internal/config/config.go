@@ -170,6 +170,9 @@ func (c *Config) Validate() error {
 	if c.LLM == "" {
 		return fmt.Errorf("XALGORIX_LLM is required. Set it to a model like 'openai/gpt-5.4' or 'anthropic/claude-sonnet-4-6'")
 	}
+	if c.APIKey == "" {
+		return fmt.Errorf("XALGORIX_API_KEY is required. Set it in ~/.xalgorix.env")
+	}
 
 	return nil
 }
