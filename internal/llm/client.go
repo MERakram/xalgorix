@@ -459,6 +459,7 @@ func (c *Client) resolveEndpoint() (string, string) {
 		"anthropic":  "https://api.anthropic.com",
 		"kie":        "https://api.kie.ai/claude/v1",
 		"minimax":    "https://api.minimax.io/v1",
+		"nvidia":     "https://integrate.api.nvidia.com/v1",
 		"openrouter": "https://openrouter.ai",
 		"deepseek":   "https://api.deepseek.com/v1",
 		"groq":       "https://api.groq.com/openai/v1",

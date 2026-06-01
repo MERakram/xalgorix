@@ -56,6 +56,7 @@ var legacyProviderBases = map[string]string{
 	"anthropic":  "https://api.anthropic.com",
 	"kie":        "https://api.kie.ai/claude/v1",
 	"minimax":    "https://api.minimax.io/v1",
+	"nvidia":     "https://integrate.api.nvidia.com/v1",
 	"openrouter": "https://openrouter.ai",
 	"deepseek":   "https://api.deepseek.com/v1",
 	"groq":       "https://api.groq.com/openai/v1",
@@ -290,7 +291,7 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 // three values the LLM client switch dispatches on.
 func legacyHeaderStyle(provider, apiBase string) string {
 	switch provider {
-	case "openai", "minimax", "deepseek", "groq", "ollama", "openrouter":
+	case "openai", "minimax", "deepseek", "groq", "ollama", "openrouter", "nvidia":
 		return "openai"
 	case "anthropic":
 		return "anthropic"

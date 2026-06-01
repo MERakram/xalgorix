@@ -15,7 +15,7 @@ func LegacyProviderShape(xalgorixLLM string) bool {
 	}
 	switch s {
 	case "openai", "anthropic", "minimax", "deepseek",
-		"groq", "ollama", "google", "gemini":
+		"groq", "ollama", "google", "gemini", "nvidia", "openrouter", "kie":
 		return true
 	}
 	return false
