@@ -86,6 +86,12 @@ func NewClient(cfg *config.Config, opts ...Option) *Client {
 	if idx := strings.Index(apiModel, "/"); idx >= 0 {
 		provider = strings.ToLower(apiModel[:idx])
 	}
+	
+	// If using OpenRouter, override provider to ensure correct auth/URL handling
+	if cfg.APIBase != "" && strings.Contains(strings.ToLower(cfg.APIBase), "openrouter.ai") {
+		provider = "openrouter"
+	}
+	
 	c := &Client{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: 10 * time.Minute},
@@ -291,11 +297,22 @@ var unknownHeaderStyleOnce sync.Once
 func applyAuthHeaders(req *http.Request, ep Endpoint) {
 	switch ep.HeaderStyle {
 	case "anthropic":
-		req.Header.Set("anthropic-version", "2023-06-01")
+		isKieAI := strings.Contains(strings.ToLower(ep.URL), "kie.ai")
+		if !isKieAI {
+			req.Header.Set("anthropic-version", "2023-06-01")
+		}
 		switch ep.Auth {
 		case AuthAPIKey:
 			if ep.APIKey != "" {
-				req.Header.Set("x-api-key", ep.APIKey)
+				if isKieAI {
+					auth := ep.APIKey
+					if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+						auth = "Bearer " + auth
+					}
+					req.Header.Set("Authorization", auth)
+				} else {
+					req.Header.Set("x-api-key", ep.APIKey)
+				}
 			}
 		case AuthOAuthBearer:
 			if ep.AccessToken != "" {
@@ -357,6 +374,65 @@ func applyAuthHeaders(req *http.Request, ep Endpoint) {
 	}
 }
 
+// ── KIE Codex types ──────────────────────────────────────────────────────────
+
+type codexContentBlock struct {
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Image string `json:"image_url,omitempty"`
+}
+
+type codexInputMessage struct {
+	Role    string              `json:"role"`
+	Content []codexContentBlock `json:"content"`
+}
+
+type codexTool struct {
+	Type string `json:"type"`
+}
+
+type codexReasoning struct {
+	Effort string `json:"effort,omitempty"`
+}
+
+type codexRequest struct {
+	Model     string            `json:"model"`
+	Stream    bool              `json:"stream"`
+	Input     []codexInputMessage `json:"input"`
+	Tools     []codexTool       `json:"tools,omitempty"`
+	Reasoning *codexReasoning   `json:"reasoning,omitempty"`
+}
+
+type codexContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type codexOutput struct {
+	Role    string             `json:"role"`
+	Content []codexContentPart `json:"content"`
+}
+
+// codexResponse handles the flexible response structure from KIE Codex API
+// The API can return either a single object with output field or an array
+type codexResponse struct {
+	// Fields from SSE response
+	Output *codexOutput `json:"output,omitempty"`
+	// Alternative format - output as array
+	OutputArray []codexOutput `json:"output_array,omitempty"`
+	// For non-streaming responses where output might be an object with content
+	Role    string             `json:"role,omitempty"`
+	Content []codexContentPart `json:"content,omitempty"`
+	// Usage tracking
+	Usage struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+	// Other fields from the API
+	Instructions string `json:"instructions,omitempty"`
+	TopLogprobs  int    `json:"top_logprobs,omitempty"`
+}
+
 // resolveEndpoint returns the full chat completions URL and clean model name.
 // Handles provider prefixes like "minimax/", "openai/", "anthropic/", etc.
 // Auto-appends /v1/chat/completions if the base doesn't already contain /v1.
@@ -379,12 +455,14 @@ func (c *Client) resolveEndpoint() (string, string) {
 	// Provider prefix in model name is the source of truth for API base.
 	// However, if a non-empty API base was explicitly set (e.g., from web UI), use it.
 	providerBases := map[string]string{
-		"openai":    "https://api.openai.com/v1",
-		"anthropic": "https://api.anthropic.com",
-		"minimax":   "https://api.minimax.io/v1",
-		"deepseek":  "https://api.deepseek.com/v1",
-		"groq":      "https://api.groq.com/openai/v1",
-		"ollama":    "http://localhost:11434/v1",
+		"openai":     "https://api.openai.com/v1",
+		"anthropic":  "https://api.anthropic.com",
+		"kie":        "https://api.kie.ai/claude/v1",
+		"minimax":    "https://api.minimax.io/v1",
+		"openrouter": "https://openrouter.ai",
+		"deepseek":   "https://api.deepseek.com/v1",
+		"groq":       "https://api.groq.com/openai/v1",
+		"ollama":     "http://localhost:11434/v1",
 		// Google's chat endpoint is /v1beta/models/MODEL:generateContent — we
 		// store the bare host here and append the version segment below.
 		"google": "https://generativelanguage.googleapis.com",
@@ -405,8 +483,20 @@ func (c *Client) resolveEndpoint() (string, string) {
 
 	// Build the URL based on provider
 	url := apiBase
-	if provider == "anthropic" || strings.Contains(strings.ToLower(apiBase), "anthropic") {
-		// Anthropic uses /v1/messages
+	// Check if using KIE Codex API
+	if strings.Contains(strings.ToLower(apiBase), "kie.ai") && strings.Contains(strings.ToLower(apiBase), "codex") {
+		// KIE Codex already has /responses endpoint, just ensure it's there
+		if !strings.HasSuffix(strings.ToLower(url), "/responses") {
+			url = url + "/responses"
+		}
+	} else if provider == "openrouter" || strings.Contains(strings.ToLower(apiBase), "openrouter.ai") {
+		url = strings.TrimRight(url, "/")
+		if !strings.HasSuffix(strings.ToLower(url), "/api/v1/chat/completions") {
+			// Prefer the canonical OpenRouter path
+			url = url + "/api/v1/chat/completions"
+		}
+	} else if provider == "anthropic" || provider == "kie" || strings.Contains(strings.ToLower(apiBase), "anthropic") || strings.Contains(strings.ToLower(apiBase), "kie.ai") {
+		// Anthropic and KIE AI (Anthropic-compatible) use /v1/messages
 		if !strings.HasSuffix(strings.ToLower(url), "/messages") {
 			if !strings.HasSuffix(apiBase, "/v1") && !strings.Contains(apiBase, "/v1/") {
 				url += "/v1"
@@ -449,13 +539,24 @@ func (c *Client) usesGeminiAPI(endpoint string) bool {
 }
 
 func isAnthropicAPIBase(value string) bool {
-	return strings.Contains(strings.ToLower(value), "anthropic")
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "anthropic") || (strings.Contains(lower, "kie.ai") && !strings.Contains(lower, "codex"))
+}
+
+func isKieCodexAPIBase(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "kie.ai") && strings.Contains(lower, "codex")
 }
 
 func (c *Client) usesAnthropicAPI(endpoint string) bool {
 	return c.provider == "anthropic" ||
 		isAnthropicAPIBase(c.cfg.APIBase) ||
 		isAnthropicAPIBase(endpoint)
+}
+
+func (c *Client) usesKieCodexAPI(endpoint string) bool {
+	return isKieCodexAPIBase(c.cfg.APIBase) ||
+		isKieCodexAPIBase(endpoint)
 }
 
 func apiErrorHasStatus(errStr string, status int) bool {
@@ -611,6 +712,7 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 		endpoint, model := ep.URL, ep.Model
 		isGoogle := ep.HeaderStyle == "gemini"
 		isAnthropic := ep.HeaderStyle == "anthropic"
+		isCodex := c.usesKieCodexAPI(endpoint)
 
 		var body []byte
 		if isGoogle {
@@ -633,6 +735,27 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				gemReq.SystemInstruction = &geminiContent{Role: "user", Parts: systemParts}
 			}
 			body, _ = json.Marshal(gemReq)
+		} else if isCodex {
+			// KIE Codex streaming
+			inputMsgs := make([]codexInputMessage, 0, len(messages))
+			for _, m := range messages {
+				contentBlock := codexContentBlock{
+					Type: "input_text",
+					Text: m.Content,
+				}
+				inputMsgs = append(inputMsgs, codexInputMessage{
+					Role:    m.Role,
+					Content: []codexContentBlock{contentBlock},
+				})
+			}
+			reasoning := &codexReasoning{Effort: "high"}
+			codexReq := codexRequest{
+				Model:     model,
+				Stream:    true,
+				Input:     inputMsgs,
+				Reasoning: reasoning,
+			}
+			body, _ = json.Marshal(codexReq)
 		} else if isAnthropic {
 			var systemPrompt string
 			anthropicMsgs := make([]Message, 0, len(messages))
@@ -670,6 +793,20 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 
 		req.Header.Set("Content-Type", "application/json")
 		applyAuthHeaders(req, ep)
+
+		// Debug: note whether Authorization header was attached (do NOT log the key)
+		if req.Header.Get("Authorization") == "" {
+			log.Printf("[llm.debug] Authorization header missing (stream)")
+		} else {
+			log.Printf("[llm.debug] Authorization header present (stream)")
+		}
+
+		// Debug: list header names (no values) and request host for diagnosis
+		hNames := make([]string, 0, len(req.Header))
+		for k := range req.Header {
+			hNames = append(hNames, k)
+		}
+		log.Printf("[llm.debug] Request host=%s headers=%v (stream)", req.URL.Host, hNames)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -736,6 +873,45 @@ func (c *Client) ChatStream(messages []Message) <-chan StreamChunk {
 				case "message_stop":
 					ch <- StreamChunk{Done: true}
 					return
+				}
+			}
+			ch <- StreamChunk{Done: true}
+			return
+		}
+
+		if isCodex {
+			// KIE Codex SSE: "data: JSON" lines
+			for scanner.Scan() {
+				line := scanner.Text()
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				data := strings.TrimPrefix(line, "data: ")
+				data = strings.TrimSpace(data)
+
+				if data == "[DONE]" {
+					ch <- StreamChunk{Done: true}
+					return
+				}
+
+				var codexResp codexResponse
+				if err := json.Unmarshal([]byte(data), &codexResp); err != nil {
+					continue
+				}
+
+				// Extract text from content blocks
+				for _, block := range codexResp.Output.Content {
+					if block.Type == "text" && block.Text != "" {
+						ch <- StreamChunk{Content: block.Text}
+					}
+				}
+
+				// Track usage if present
+				if codexResp.Usage.InputTokens > 0 || codexResp.Usage.OutputTokens > 0 {
+					c.mu.Lock()
+					c.totalIn += codexResp.Usage.InputTokens
+					c.totalOut += codexResp.Usage.OutputTokens
+					c.mu.Unlock()
 				}
 			}
 			ch <- StreamChunk{Done: true}
@@ -829,6 +1005,7 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 
 	isGoogle := ep.HeaderStyle == "gemini"
 	isAnthropic := ep.HeaderStyle == "anthropic"
+	isCodex := c.usesKieCodexAPI(endpoint)
 
 	var body []byte
 	if isGoogle {
@@ -853,6 +1030,30 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 		body, err = json.Marshal(gemReq)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal Gemini request: %w", err)
+		}
+	} else if isCodex {
+		// KIE Codex: input array format with content blocks
+		inputMsgs := make([]codexInputMessage, 0, len(messages))
+		for _, m := range messages {
+			contentBlock := codexContentBlock{
+				Type: "input_text",
+				Text: m.Content,
+			}
+			inputMsgs = append(inputMsgs, codexInputMessage{
+				Role:    m.Role,
+				Content: []codexContentBlock{contentBlock},
+			})
+		}
+		reasoning := &codexReasoning{Effort: "high"}
+		codexReq := codexRequest{
+			Model:     model,
+			Stream:    false,
+			Input:     inputMsgs,
+			Reasoning: reasoning,
+		}
+		body, err = json.Marshal(codexReq)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal Codex request: %w", err)
 		}
 	} else if isAnthropic {
 		// Anthropic: system as top-level field, max_tokens required
@@ -904,6 +1105,7 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -917,6 +1119,47 @@ func (c *Client) doChat(messages []Message) (out string, err error) {
 			return "", fmt.Errorf("no content in Gemini response")
 		}
 		return gemResp.Candidates[0].Content.Parts[0].Text, nil
+	}
+
+	if isCodex {
+		var codexResp codexResponse
+		if err := json.Unmarshal(respBody, &codexResp); err != nil {
+			return "", fmt.Errorf("failed to parse Codex response: %w", err)
+		}
+		// Track token usage
+		c.mu.Lock()
+		c.totalIn += codexResp.Usage.InputTokens
+		c.totalOut += codexResp.Usage.OutputTokens
+		c.mu.Unlock()
+
+		// Extract text from various possible response formats
+		// Format 1: output object with content blocks
+		if codexResp.Output != nil && len(codexResp.Output.Content) > 0 {
+			for _, block := range codexResp.Output.Content {
+				if block.Type == "text" && block.Text != "" {
+					return block.Text, nil
+				}
+			}
+		}
+		// Format 2: direct content array (top-level)
+		if len(codexResp.Content) > 0 {
+			for _, block := range codexResp.Content {
+				if block.Type == "text" && block.Text != "" {
+					return block.Text, nil
+				}
+			}
+		}
+		// Format 3: output array
+		if len(codexResp.OutputArray) > 0 && len(codexResp.OutputArray[0].Content) > 0 {
+			for _, block := range codexResp.OutputArray[0].Content {
+				if block.Type == "text" && block.Text != "" {
+					return block.Text, nil
+				}
+			}
+		}
+
+		log.Printf("[llm] Codex response with no extractable text content: %s", string(respBody))
+		return "", fmt.Errorf("no text content in Codex response")
 	}
 
 	if isAnthropic {

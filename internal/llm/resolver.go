@@ -52,14 +52,16 @@ func (e *ConfigError) Error() string { return e.Msg }
 // the v4.4.21 client.resolveEndpoint so the legacy resolver
 // produces byte-identical URL results to the pre-feature path.
 var legacyProviderBases = map[string]string{
-	"openai":    "https://api.openai.com/v1",
-	"anthropic": "https://api.anthropic.com",
-	"minimax":   "https://api.minimax.io/v1",
-	"deepseek":  "https://api.deepseek.com/v1",
-	"groq":      "https://api.groq.com/openai/v1",
-	"ollama":    "http://localhost:11434/v1",
-	"google":    "https://generativelanguage.googleapis.com",
-	"gemini":    "https://generativelanguage.googleapis.com",
+	"openai":     "https://api.openai.com/v1",
+	"anthropic":  "https://api.anthropic.com",
+	"kie":        "https://api.kie.ai/claude/v1",
+	"minimax":    "https://api.minimax.io/v1",
+	"openrouter": "https://openrouter.ai",
+	"deepseek":   "https://api.deepseek.com/v1",
+	"groq":       "https://api.groq.com/openai/v1",
+	"ollama":     "http://localhost:11434/v1",
+	"google":     "https://generativelanguage.googleapis.com",
+	"gemini":     "https://generativelanguage.googleapis.com",
 }
 
 // LegacyProviderBaseURL returns the canonical legacy API base URL
@@ -248,6 +250,14 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 
 	url := apiBase
 	switch {
+	case isKieCodexAPIBase(apiBase):
+		if !strings.HasSuffix(strings.ToLower(url), "/responses") {
+			url = url + "/responses"
+		}
+	case provider == "openrouter" || strings.Contains(strings.ToLower(apiBase), "openrouter.ai"):
+		if !strings.HasSuffix(strings.ToLower(url), "/api/v1/chat/completions") {
+			url = url + "/api/v1/chat/completions"
+		}
 	case provider == "anthropic" || isAnthropicAPIBase(apiBase):
 		if !strings.HasSuffix(strings.ToLower(url), "/messages") {
 			if !strings.HasSuffix(apiBase, "/v1") && !strings.Contains(apiBase, "/v1/") {
@@ -280,7 +290,7 @@ func (l *legacyResolver) Resolve(ctx context.Context) (Endpoint, error) {
 // three values the LLM client switch dispatches on.
 func legacyHeaderStyle(provider, apiBase string) string {
 	switch provider {
-	case "openai", "minimax", "deepseek", "groq", "ollama":
+	case "openai", "minimax", "deepseek", "groq", "ollama", "openrouter":
 		return "openai"
 	case "anthropic":
 		return "anthropic"

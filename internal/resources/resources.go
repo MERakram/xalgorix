@@ -1,8 +1,9 @@
 // Package resources provides real-time system resource monitoring for
 // dynamic scan admission control and runtime backpressure.
 //
-// It reads Linux /proc files (meminfo, loadavg) and uses syscall.Statfs
-// for disk space. All thresholds are configurable via environment variables.
+// It reads Linux /proc files and macOS system commands for resource data,
+// and uses syscall.Statfs for disk space. All thresholds are configurable via
+// environment variables.
 package resources
 
 import (
@@ -11,6 +12,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -929,55 +931,177 @@ func ProtectCurrentProcess() {
 	log.Printf("[RESOURCES] xalgorix OOM score set to -500")
 }
 
-// ── Linux /proc readers ──
+// ── System resource readers ──
 
-// readLoadAvg reads 1-minute load average from /proc/loadavg.
+// readLoadAvg reads 1-minute load average from the host system.
 func readLoadAvg() float64 {
-	data, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		log.Printf("[RESOURCES] Cannot read /proc/loadavg: %v", err)
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile("/proc/loadavg")
+		if err != nil {
+			log.Printf("[RESOURCES] Cannot read /proc/loadavg: %v", err)
+			return 0
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) < 1 {
+			return 0
+		}
+		val, err := strconv.ParseFloat(fields[0], 64)
+		if err != nil {
+			return 0
+		}
+		return val
+	case "darwin":
+		val, err := readDarwinLoadAvg()
+		if err != nil {
+			log.Printf("[RESOURCES] Cannot read load average on darwin: %v", err)
+			return 0
+		}
+		return val
+	default:
 		return 0
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 1 {
-		return 0
-	}
-	val, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return 0
-	}
-	return val
 }
 
-// readMemInfo reads total and available memory from /proc/meminfo.
+// readMemInfo reads total and available memory from the host system.
 func readMemInfo() (totalMB, availableMB int64) {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		log.Printf("[RESOURCES] Cannot read /proc/meminfo: %v", err)
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile("/proc/meminfo")
+		if err != nil {
+			log.Printf("[RESOURCES] Cannot read /proc/meminfo: %v", err)
+			return 0, 0
+		}
+
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			val, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				continue
+			}
+			// /proc/meminfo reports in kB
+			switch fields[0] {
+			case "MemTotal:":
+				totalMB = val / 1024
+			case "MemAvailable:":
+				availableMB = val / 1024
+			}
+		}
+		return totalMB, availableMB
+	case "darwin":
+		totalMB, availableMB, err := readDarwinMemInfo()
+		if err != nil {
+			log.Printf("[RESOURCES] Cannot read memory info on darwin: %v", err)
+			return 0, 0
+		}
+		return totalMB, availableMB
+	default:
 		return 0, 0
 	}
+}
 
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
+func readDarwinLoadAvg() (float64, error) {
+	output, err := exec.Command("sysctl", "-n", "vm.loadavg").Output()
+	if err != nil {
+		return 0, err
+	}
+	fields := strings.Fields(strings.TrimSpace(string(output)))
+	for _, field := range fields {
+		field = strings.Trim(field, "{}")
+		if field == "" {
 			continue
 		}
-		val, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			continue
-		}
-		// /proc/meminfo reports in kB
-		switch fields[0] {
-		case "MemTotal:":
-			totalMB = val / 1024
-		case "MemAvailable:":
-			availableMB = val / 1024
+		val, parseErr := strconv.ParseFloat(field, 64)
+		if parseErr == nil {
+			return val, nil
 		}
 	}
-	return totalMB, availableMB
+	return 0, fmt.Errorf("unexpected vm.loadavg output: %q", strings.TrimSpace(string(output)))
+}
+
+func readDarwinMemInfo() (totalMB, availableMB int64, err error) {
+	totalOut, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	if err != nil {
+		return 0, 0, err
+	}
+	totalBytes, err := strconv.ParseInt(strings.TrimSpace(string(totalOut)), 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	vmStatOut, err := exec.Command("vm_stat").Output()
+	if err != nil {
+		return 0, 0, err
+	}
+	pageSizeBytes, freePages, inactivePages, speculativePages, purgeablePages, err := parseDarwinVMStat(string(vmStatOut))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	totalMB = totalBytes / 1024 / 1024
+	availableMB = int64(pageSizeBytes) * int64(freePages+inactivePages+speculativePages+purgeablePages) / (1024 * 1024)
+	return totalMB, availableMB, nil
+}
+
+func parseDarwinVMStat(output string) (pageSizeBytes, freePages, inactivePages, speculativePages, purgeablePages uint64, err error) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.Contains(line, "page size of"):
+			fields := strings.Fields(line)
+			for i := 0; i < len(fields)-2; i++ {
+				if fields[i] == "size" && fields[i+1] == "of" {
+					pageSizeBytes, err = strconv.ParseUint(strings.Trim(fields[i+2], ",."), 10, 64)
+					if err != nil {
+						return 0, 0, 0, 0, 0, err
+					}
+					break
+				}
+			}
+		case strings.HasPrefix(line, "Pages free:"):
+			freePages, err = parseDarwinPageCount(line)
+			if err != nil {
+				return 0, 0, 0, 0, 0, err
+			}
+		case strings.HasPrefix(line, "Pages inactive:"):
+			inactivePages, err = parseDarwinPageCount(line)
+			if err != nil {
+				return 0, 0, 0, 0, 0, err
+			}
+		case strings.HasPrefix(line, "Pages speculative:"):
+			speculativePages, err = parseDarwinPageCount(line)
+			if err != nil {
+				return 0, 0, 0, 0, 0, err
+			}
+		case strings.HasPrefix(line, "Pages purgeable:"):
+			purgeablePages, err = parseDarwinPageCount(line)
+			if err != nil {
+				return 0, 0, 0, 0, 0, err
+			}
+		}
+	}
+	if pageSizeBytes == 0 {
+		return 0, 0, 0, 0, 0, fmt.Errorf("missing page size in vm_stat output")
+	}
+	return pageSizeBytes, freePages, inactivePages, speculativePages, purgeablePages, nil
+}
+
+func parseDarwinPageCount(line string) (uint64, error) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0, fmt.Errorf("unexpected vm_stat line: %q", line)
+	}
+	count := strings.TrimRight(fields[len(fields)-1], ".")
+	return strconv.ParseUint(count, 10, 64)
 }
 
 func readProcessRSSMB() int64 {
+	if runtime.GOOS != "linux" {
+		return 0
+	}
 	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {
 		return 0
