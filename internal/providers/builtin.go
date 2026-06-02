@@ -262,7 +262,7 @@ var builtinList = []Entry{
 		BaseURL:     "https://integrate.api.nvidia.com/v1",
 		HeaderStyle: "openai",
 		AuthMethods: []string{"api_key"},
-		Models:      []string{"z-ai/glm-5.1", "meta/llama-3.1-70b-instruct"},
+		Models:      []string{"minimaxai/minimax-m2.7", "z-ai/glm-5.1", "meta/llama-3.1-70b-instruct"},
 	},
 	{
 		ID:          "ollama",
